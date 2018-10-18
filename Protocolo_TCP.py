@@ -160,21 +160,18 @@ def ack_recv():
 def payload_recv():
 	return
 
-def send(fd, conexao, payload):
+def send(fd, conexao, dados):
 	
-	conexao.send_queue += payload
+	conexao.send_queue += dados
 	
 	size_window = min(conexao.cwnd, conexao.rwnd)
-	disponivel = max(size_window - len())
-	
-	while conexao.send_queue != b'':
-		if conexao.noAck_queue < min():
-			#enviar pacote
-			conexao.noAck_queue += payload[:MSS]
-			conexao.nextSeq_no += len(payload[:MSS])
-			payload = payload[MSS:]
-		else:
-			conexao.send_queue = payload
+	disponivel = max(size_window - len(conexao.noAck_queue), 0)
+	a_transmitir = conexao.send_queue[:disponivel]
+	noAck_queue += a_transmitir
+
+	for i in range(0, len(a_transmitir), MSS):
+		payload = a_transmitir[i:i+MSS]
+		#Envia payload
 	
 	return 0
 
