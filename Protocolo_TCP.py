@@ -27,7 +27,6 @@ conexoes = {}
 class Conexao:
 	def __init__(self, id_conexao, seq_no, ack_no):
 		self.id_conexao = id_conexao
-		self.seq_no = seq_no
 		self.ack_no = ack_no
 
 		self.send_base = seq_no
@@ -35,6 +34,8 @@ class Conexao:
 
 		self.send_queue = b""
 		self.noAck_queue = b""
+		
+		self.cwnd = self.rwnd = 10*MSS
 
 		self.timer = None
 
@@ -160,10 +161,42 @@ def payload_recv():
 	return
 
 def send(fd, conexao, payload):
-	conexao.send_queue += payload 
-	return
+	
+	conexao.send_queue += payload
+	
+	size_window = min(conexao.cwnd, conexao.rwnd)
+	disponivel = max(size_window - len())
+	
+	while conexao.send_queue != b'':
+		if conexao.noAck_queue < min():
+			#enviar pacote
+			conexao.noAck_queue += payload[:MSS]
+			conexao.nextSeq_no += len(payload[:MSS])
+			payload = payload[MSS:]
+		else:
+			conexao.send_queue = payload
+	
+	return 0
 
+def abre_conexao(fd, id_conexao):
+	(src_addr, src_port, dst_addr, dst_port) = id_conexao
+	
+	print('%s:%d -> %s:%d (seq=%d)' % (src_addr, src_port,
+                                           dst_addr, dst_port, seq_no))
 
+		#Alocando nova conexão
+		conexoes[id_conexao] = conexao = Conexao(id_conexao=id_conexao,
+	                                                 seq_no=struct.unpack('I', os.urandom(4))[0],
+	                                                 ack_no=seq_no + 1)
+	
+		fd.sendto(fix_checksum(make_synack(dst_port, src_port, conexao.seq_no, conexao.ack_no),
+	                           src_addr, dst_addr),
+	              (src_addr, src_port))
+				  
+		conexao.nextSeq_no += 1
+		
+	return conexao
+	
 #Recebe novos dados do raw socket
 def raw_recv(fd):
 	#Recebe um pacote do socket
@@ -197,29 +230,19 @@ def raw_recv(fd):
 	#Identificação das flags
 	#Conexão requerida e aceita
 	if (flags & FLAGS_SYN) == FLAGS_SYN:
-		print('%s:%d -> %s:%d (seq=%d)' % (src_addr, src_port,
-                                           dst_addr, dst_port, seq_no))
+		conexao = abre_conexao(fd, id_conexao)
 
-		#Alocando nova conexão
-		conexoes[id_conexao] = conexao = Conexao(id_conexao=id_conexao,
-	                                                 seq_no=struct.unpack('I', os.urandom(4))[0],
-	                                                 ack_no=seq_no + 1)
+		#asyncio.get_event_loop().call_later(.1, send_next, fd, conexao
 	
-		fd.sendto(fix_checksum(make_synack(dst_port, src_port, conexao.seq_no, conexao.ack_no),
-	                           src_addr, dst_addr),
-	              (src_addr, src_port))
-			
-		print("Seq_no: %d \n", conexao.seq_no)
-		print("Ack_no: %d \n",conexao.ack_no)
-		conexao.seq_no += 1
-
-		#asyncio.get_event_loop().call_later(.1, send_next, fd, conexao)
-		
-	
-	#
 	elif id_conexao in conexoes:
 		conexao = conexoes[id_conexao]
 		conexao.ack_no += len(payload)
+		
+		if (flags & FLAGS_ACK) == FLAGS_ACK:
+		ack_recv()
+	
+		if (len(payload) != 0):
+		payload_recv()
 	#
 	else:
 		print('%s:%d -> %s:%d (pacote associado a conexão desconhecida)' %
