@@ -11,6 +11,7 @@ import socket
 import struct
 import os
 import random
+import time
 
 FLAGS_FIN = 1<<0 #Flag de fim de conexão
 FLAGS_SYN = 1<<1 #Flag de sicronização
@@ -26,20 +27,35 @@ TESTAR_PERDA_ENVIO = False
 conexoes = {}
 class Conexao:
 	def __init__(self, id_conexao, seq_no, ack_no):
+		#Informações para a conexao
 		self.id_conexao = id_conexao
+		
+		#Controle do envio de ack_no
 		self.ack_no = ack_no
 
+		#Controle de recebimento de ack_no
 		self.send_base = seq_no
-		self.nextSeq_no = seq_no
+		#Controle de envio de seq_no
+		self.next_seq_no = seq_no
 
+		#Dicionario (seq_no, current time)
+		self.dic_seq_no_curr_time = {}
+
+		#Filas de envio
 		self.send_queue = b""
-		self.noAck_queue = b""
+		self.no_ack_queue = b""
 		
+		#Janelas
 		self.cwnd = self.rwnd = 10*MSS
 
+		#Timer
 		self.timer = None
 
-
+		#Flags
+		#Flag para timer ativo
+		self.flag_timer_active = False
+		#Flag handshake
+		self.flag_handshake = True
 
 
 #Converte endereço para string
@@ -115,66 +131,7 @@ def fix_checksum(segment, src_addr, dst_addr):
 	
 	return bytes(seg)
 
-#Gerencia fila de envio
-def send_next(fd, conexao):
-	#Obtem segmento da fila
-	payload = conexao.send_queue[:MSS]
-	
-	#Remove o segmento da fila
-	conexao.send_queue = conexao.send_queue[MSS:]
-	
-	#Obtem informações da conexão
-	(dst_addr, dst_port, src_addr, src_port) = conexao.id_conexao
-	
-	#Monta segmento para envio
-	#(Formato, porta fonte, porta destino, sequence number da conexão, ack number da conexão, 
-	# bit ACK, Window Size, CheckSum, Urg data pointer) + dados obtidos da fila de envio
-	segment = struct.pack('!HHIIHHHH', src_port, dst_port, conexao.seq_no,
-                          conexao.ack_no, (5<<12)|FLAGS_ACK,
-                          1024, 0, 0) + payload
-	
-	#Geração do novo sequence number
-	conexao.seq_no = (conexao.seq_no + len(payload)) & 0xffffffff
-	
-	#Segmento com checksum
-	segment = fix_checksum(segment, src_addr, dst_addr)
-
-	#
-	if not TESTAR_PERDA_ENVIO or random.random() < 0.95:
-		fd.sendto(segment, (dst_addr, dst_port))
-	#Finaliza conexão
-	if conexao.send_queue == b"":
-		segment = struct.pack('!HHIIHHHH', src_port, dst_port, conexao.seq_no,
-                          conexao.ack_no, (5<<12)|FLAGS_FIN|FLAGS_ACK,
-                          0, 0, 0)
-		segment = fix_checksum(segment, src_addr, dst_addr)
-		fd.sendto(segment, (dst_addr, dst_port))
-	#Chama novamente o envio de um novo segmento presente na fila
-	else:
-		asyncio.get_event_loop().call_later(.001, send_next, fd, conexao)
-
-
-def ack_recv():
-	return
-
-def payload_recv():
-	return
-
-def send(fd, conexao, dados):
-	
-	conexao.send_queue += dados
-	
-	size_window = min(conexao.cwnd, conexao.rwnd)
-	disponivel = max(size_window - len(conexao.noAck_queue), 0)
-	a_transmitir = conexao.send_queue[:disponivel]
-	noAck_queue += a_transmitir
-
-	for i in range(0, len(a_transmitir), MSS):
-		payload = a_transmitir[i:i+MSS]
-		#Envia payload
-	
-	return 0
-
+#Separar função(?)
 def abre_conexao(fd, id_conexao):
 	(src_addr, src_port, dst_addr, dst_port) = id_conexao
 	
@@ -190,10 +147,89 @@ def abre_conexao(fd, id_conexao):
 	                           src_addr, dst_addr),
 	              (src_addr, src_port))
 				  
-		conexao.nextSeq_no += 1
+		conexao.next_seq_no += 1
 		
 	return conexao
+
+
+#Trata recebimento do ack_no
+def ack_recv(conexao, ack_no):
+
+	if(ack_no > conexao.send_base):
+		
+		#Handshake, nenhum dado presente nas filas
+		#Duvidas... o que fzr
+		if(flag_handshake == True):
+			conexao.send_base = ack_no
+		#Situação onde a conexão já esta estabelecida
+		else:
+			#Dados confirmados a serem removidos da noAck_
+			qtd_dados_reconhecidos = ack_no - conexao.send_base - 1 
+			#Atualiza send_base
+			conexao.send_base = ack_no
+			
+			#Para timer do ultimo pacote sem resposta ack 
+			conexao.timer.cancel()
+			conexao.flag_timer_active = !(conexao.timer.cancelled())
+
+			#Remove da fila de enviados sem confirmação
+			conexao.no_ack_queue = conexao.no_ack_queue[qtd_dados_reconhecidos:]
+
+			#No caso de haver mais pacotes ainda sem resposta ack, start time para o ultimo deles
+			if(conexao.no_ack_queue != b''):
+				#Adicionar novo timer
+				#Usar dicionario
+				#Como referenciar o pacote e fazer callback?
+
+
+
+#Trata recebimento de payload
+def payload_recv(conexao, seq_no):
+	return
+
+def send(fd, conexao, dados):
 	
+	conexao.send_queue += dados
+	
+	size_window = min(conexao.cwnd, conexao.rwnd)
+	disponivel = max(size_window - len(conexao.no_ack_queue), 0)
+	a_transmitir = conexao.send_queue[:disponivel]
+	conexao.no_ack_queue += a_transmitir
+
+	for i in range(0, len(a_transmitir), MSS):
+		payload = a_transmitir[i:i+MSS]
+		send_raw(fd, conexao, payload)
+	
+
+#Enviando dados pelo raw socket
+def send_raw(fd, conexao, payload):
+	
+	#Conexão a ser enviado o pacote
+	(dst_addr, dst_port, src_addr, src_port) = conexao.id_conexao
+
+	#Montando pacote
+	segment = struct.pack('!HHIIHHHH', src_port, dst_port, conexao.next_seq_no,
+                          conexao.ack_no, (5<<12)|FLAGS_ACK,
+                          1024, 0, 0) + payload
+
+	#Pacote com checksum
+	segment = fix_checksum(segment, src_addr, dst_addr)
+
+	#Enviando
+	fd.sendto(Segment, (src_addr, src_port))
+
+	#Adiciona timer se não tiver
+	if(conexao.flag_timer_active == False):
+		#Reenvia o pacote caso o timer não estiver desativado
+		conexao.timer = asyncio.get_event_loop().call_later(.001, send_raw, fd, conexao, payload)
+		conexao.flag_timer_active = True
+
+	#Adicionando current time do seq_no enviado
+	conexao.dic_seq_no_curr_time[conexao.next_seq_no] = time.time()
+
+	#Atualizando sequence number
+	conexao.next_seq_no = (conexao.next_seq_no + len(payload)) & 0xffffffff
+
 #Recebe novos dados do raw socket
 def raw_recv(fd):
 	#Recebe um pacote do socket
@@ -215,31 +251,28 @@ def raw_recv(fd):
 	#Aceita somente a porta 7000
 	if dst_port != 7000:
 		return
-		#segment = struct.pack('!HHIIHHHH', src_port, dst_port, struct.unpack('I', os.urandom(4))[0] ,
-        #                  seq_no + 1, (5<<12)|FLAGS_RST,
-        #                  0, 0, 0)
-		#segment = fix_checksum(segment, src_addr, dst_addr)
-		#fd.sendto(segment, (dst_addr, dst_port))
 		
-	#
-	#print(segment.decode())
 	payload = segment[4*(flags>>12):]
+	
 	#Identificação das flags
 	#Conexão requerida e aceita
 	if (flags & FLAGS_SYN) == FLAGS_SYN:
+		#Verificar ack antes de criar objeto(?)
 		conexao = abre_conexao(fd, id_conexao)
 
-		#asyncio.get_event_loop().call_later(.1, send_next, fd, conexao
-	
 	elif id_conexao in conexoes:
 		conexao = conexoes[id_conexao]
 		conexao.ack_no += len(payload)
 		
 		if (flags & FLAGS_ACK) == FLAGS_ACK:
-		ack_recv()
+			#Recebe ack e tirar da fila de não confirmados
+			ack_recv(conexao, ack_no)
 	
 		if (len(payload) != 0):
-		payload_recv()
+			#Recebe payload e envia pacote com ack e sem dados
+			payload_recv(conexao, seq_no)
+			#Retorna dados para a aplicação(?)
+			#return payload
 	#
 	else:
 		print('%s:%d -> %s:%d (pacote associado a conexão desconhecida)' %
