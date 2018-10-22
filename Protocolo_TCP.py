@@ -4,7 +4,7 @@
 # as conexões TCP abertas por este programa:
 #
 # sudo iptables -I OUTPUT -p tcp --tcp-flags RST RST -j DROP
-#ss
+#
 
 import asyncio
 import socket
