@@ -14,7 +14,7 @@ import random
 import time
 
 FLAGS_FIN = 1<<0 #Flag de fim de conexao
-FLAGS_SYN = 1<<1 #Flag de sicronizaçao
+FLAGS_SYN = 1<<1 #Flag de sicronizacao
 FLAGS_RST = 1<<2 #Flag de warning socket nao existente
 FLAGS_ACK = 1<<4 #Flag de resposta ACK
 
@@ -22,12 +22,12 @@ MSS = 1460 #Maximum Segment Size
 
 TESTAR_PERDA_ENVIO = False
 
-#Anotações
-#Send coloca na fila de envio, se fila estiver vazia já enviar. Depende da janela
+#Anotacoes
+#Send coloca na fila de envio, se fila estiver vazia ja enviar. Depende da janela
 conexoes = {}
 class Conexao:
 	def __init__(self, id_conexao, seq_no, ack_no):
-		#Informações para a conexao
+		#Informacoes para a conexao
 		self.id_conexao = id_conexao
 		
 		#Controle do envio de ack_no
@@ -52,31 +52,32 @@ class Conexao:
 		self.timer = None
 
 		#Flags
-		#Flag para timer ativo
-		self.flag_timer_active = False
 		#Flag handshake
 		self.flag_handshake = True
 
+		# dados da camada de aplicação
+		self.http_req = b''
 
-#Converte endereço para string
+
+#Converte endereco para string
 def addr2str(addr):
 	return '%d.%d.%d.%d' % tuple(int(x) for x in addr)
 
-#Converte string para endereço
+#Converte string para endereco
 def str2addr(addr):
 	return bytes(int(x) for x in addr.split('.'))
 
-#Cabeçalho da camada de rede - IP Datagram Format 
+#Cabecalho da camada de rede - IP Datagram Format 
 def handle_ipv4_header(packet):
 	#Versao do procotolo IP
 	version = packet[0] >> 4
-	#Tamanho do Cabeçalho
+	#Tamanho do Cabecalho
 	ihl = packet[0] & 0xf
-	#Verifica se a versao do IP é a 4
+	#Verifica se a versao do IP eh a 4
 	assert version == 4
-	#Endereço fonte
+	#Endereco fonte
 	src_addr = addr2str(packet[12:16])
-	#Endereço destino
+	#Endereco destino
 	dst_addr = addr2str(packet[16:20])
 	#Segmento contendo o protocolo TCP
 	segment = packet[4*ihl:]
@@ -84,19 +85,28 @@ def handle_ipv4_header(packet):
 	return src_addr, dst_addr, segment
 
 #Aceita conexao - Syn + ACK
-def make_synack(src_port, dst_port, seq_no, ack_no):
+def make_synack(conexao):
 	#Monta pacote a ser enviado
 	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit ACK e bit SYN, 
 	# Window Size, CheckSum, Urg data pointer)
-	return struct.pack('!HHIIHHHH', src_port, dst_port, seq_no,ack_no, (5<<12)|FLAGS_ACK|FLAGS_SYN,
+	(src_addr, src_port, dst_addr, dst_port) = conexao.id_conexao
+	return struct.pack('!HHIIHHHH', dst_port, src_port, conexao.next_seq_no, conexao.ack_no, (5<<12)|FLAGS_ACK|FLAGS_SYN,
 						1024, 0, 0)
 
-#Rejeita conexao - RST - Porta nao disponivel
-def make_rst(src_port, dst_port, seq_no, ack_no):
+def make_ack(conexao):
 	#Monta pacote a ser enviado
-	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit RST, 
+	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit ACK e bit SYN, 
 	# Window Size, CheckSum, Urg data pointer)
-	return struct.pack('!HHIIHHHH', src_port, dst_port, seq_no,ack_no, (5<<12)|FLAGS_RST,
+	(src_addr, src_port, dst_addr, dst_port) = conexao.id_conexao
+	return struct.pack('!HHIIHHHH', dst_port, src_port, conexao.next_seq_no, conexao.ack_no, (5<<12)|FLAGS_ACK,
+						1024, 0, 0)
+
+def make_fin(conexao):
+	#Monta pacote a ser enviado
+	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit FIN, 
+	# Window Size, CheckSum, Urg data pointer)
+	(src_addr, src_port, dst_addr, dst_port) = conexao.id_conexao
+	return struct.pack('!HHIIHHHH', dst_port, src_port, conexao.next_seq_no, conexao.ack_no, (5<<12)|FLAGS_FIN|FLAGS_ACK,
 						1024, 0, 0)
 
 #Calcula CheckSum
@@ -119,8 +129,8 @@ def calc_checksum(segment):
 
 #Corrije o CheckSum
 def fix_checksum(segment, src_addr, dst_addr):
-	#Pseudo cabeçalho
-	#Endereço Fonte + Endereço Destino + (formato, Identificador TCP, Tamanho do segmento)
+	#Pseudo cabecalho
+	#Endereco Fonte + Endereco Destino + (formato, Identificador TCP, Tamanho do segmento)
 	pseudohdr = str2addr(src_addr) + str2addr(dst_addr) + struct.pack('!HH', 0x0006, len(segment))
 	#Conversao para Byte
 	seg = bytearray(segment)
@@ -131,7 +141,11 @@ def fix_checksum(segment, src_addr, dst_addr):
 
 	return bytes(seg)
 
-#Separar funçao(?)
+def send_segment(fd, conexao, segment):
+	(src_addr, src_port, dst_addr, dst_port) = conexao.id_conexao
+	fd.sendto(fix_checksum(segment,	src_addr, dst_addr), (src_addr, src_port))
+
+#Separar funcao(?)
 def abre_conexao(fd, id_conexao,seq_no):
 	(src_addr, src_port, dst_addr, dst_port) = id_conexao
 
@@ -143,9 +157,7 @@ def abre_conexao(fd, id_conexao,seq_no):
 														seq_no=struct.unpack('I', os.urandom(4))[0],
 														ack_no=seq_no + 1)
 
-	fd.sendto(fix_checksum(make_synack(dst_port, src_port, conexao.next_seq_no, conexao.ack_no),
-								src_addr, dst_addr),
-					(src_addr, src_port))
+	send_segment(fd, conexao, make_synack(conexao))
 					
 	conexao.next_seq_no += 1
 		
@@ -160,19 +172,33 @@ def ack_recv(conexao, ack_no):
 		if(conexao.flag_handshake == True):
 			conexao.send_base = ack_no
 			conexao.flag_handshake = False
-		#Situaçao onde a conexao já esta estabelecida
+			print("eh na sola da bota eh na palma da bota")
+		#Situacao onde a conexao já esta estabelecida
 		else:
 			#Dados confirmados a serem removidos da noAck_
-			qtd_dados_reconhecidos = ack_no - conexao.send_base - 1 
+			print("Entrei no else\n")
+			qtd_dados_reconhecidos = ack_no - conexao.send_base
 			#Atualiza send_base
 			conexao.send_base = ack_no
 			
 			#Para timer do ultimo pacote sem resposta ack 
-			conexao.timer.cancel()
-			conexao.flag_timer_active = ~(conexao.timer.cancelled())
+			if conexao.timer:
+				conexao.timer.cancel()
+				conexao.timer = None #~(conexao.timer.cancelled())
 
-			#Remove da fila de enviados sem confirmaçao
+			#Remove da fila de enviados sem confirmacao
 			conexao.no_ack_queue = conexao.no_ack_queue[qtd_dados_reconhecidos:]
+
+			print("ANTES: \n")
+			print(conexao.send_queue)
+			print("\n")
+			print(conexao.no_ack_queue)
+			print("\n")
+			#send(fd,conexao,b"mensagem qualquer em binario\n")
+			print("DEPOIS: \n")
+			print(conexao.send_queue)	
+			print("\n")
+			print(conexao.no_ack_queue)
 
 			#No caso de haver mais pacotes ainda sem resposta ack, start time para o ultimo deles
 			if(conexao.no_ack_queue != b''):
@@ -184,10 +210,33 @@ def ack_recv(conexao, ack_no):
 
 
 
-	#Trata recebimento de payload
-def payload_recv(conexao, seq_no):
-	print("ta em shokk!?")
-	return
+#Trata recebimento de payload
+def payload_recv(conexao, seq_no, payload):
+	if conexao.ack_no == seq_no:
+		conexao.ack_no += len(payload)
+		send_segment(fd, conexao, make_ack(conexao))
+		app_recv(fd, conexao, payload)
+
+
+def app_recv(fd, conexao, payload):
+	conexao.http_req += payload
+	if b'\n\n' in conexao.http_req or b'\r\n\r\n' in conexao.http_req:
+		method, path, _ = conexao.http_req.split(b' ', 2)
+		print('Recebida requisição HTTP:', method, path)
+		if path == b'/':
+			send(fd, conexao, b'HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\nExperimente <a href="/arquivo">arquivo</a>')
+			close(fd, conexao)
+		elif path == b'/arquivo':
+			send(fd, conexao, b'HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n' + 100000*b'repetido\n')
+			close(fd, conexao)
+		else:
+			send(fd, conexao, b'HTTP/1.0 404 Not Found\r\n\r\nNot Found')
+			close(fd, conexao)
+
+
+def close(fd, conexao):
+	send_segment(fd, conexao, make_fin(conexao))
+
 
 def send(fd, conexao, dados):
 
@@ -196,12 +245,14 @@ def send(fd, conexao, dados):
 	size_window = min(conexao.cwnd, conexao.rwnd)
 	disponivel = max(size_window - len(conexao.no_ack_queue), 0)
 	a_transmitir = conexao.send_queue[:disponivel]
+	conexao.send_queue = conexao.send_queue[disponivel:]
 	conexao.no_ack_queue += a_transmitir
 
 	for i in range(0, len(a_transmitir), MSS):
 		payload = a_transmitir[i:i+MSS]
 		send_raw(fd, conexao, payload)
-
+		
+	print("========================= SAINDO ======================================\n")
 
 	#Enviando dados pelo raw socket
 def send_raw(fd, conexao, payload):
@@ -209,22 +260,24 @@ def send_raw(fd, conexao, payload):
 	#Conexao a ser enviado o pacote
 	(dst_addr, dst_port, src_addr, src_port) = conexao.id_conexao
 
+	print('send_raw called')
+
 	#Montando pacote
 	segment = struct.pack('!HHIIHHHH', src_port, dst_port, conexao.next_seq_no,
-							conexao.ack_no, (5<<12)|FLAGS_ACK,
+							0, (5<<12),
 							1024, 0, 0) + payload
 
 	#Pacote com checksum
 	segment = fix_checksum(segment, src_addr, dst_addr)
 
 	#Enviando
-	fd.sendto(Segment, (src_addr, src_port))
+	fd.sendto(segment, (src_addr, src_port))
 
 	#Adiciona timer se nao tiver
-	if(conexao.flag_timer_active == False):
+	if conexao.timer is None:
 		#Reenvia o pacote caso o timer nao estiver desativado
-		conexao.timer = asyncio.get_event_loop().call_later(.001, send_raw, fd, conexao, payload)
-		conexao.flag_timer_active = True
+		#conexao.timer = asyncio.get_event_loop().call_later(3, send_raw, fd, conexao, payload)
+		print("Criei \n")
 
 	#Adicionando current time do seq_no enviado
 	conexao.dic_seq_no_curr_time[conexao.next_seq_no] = time.time()
@@ -237,10 +290,10 @@ def raw_recv(fd):
 	#Recebe um pacote do socket
 	packet = fd.recv(12000)
 
-	#Tratamento do cabeçalho da camada de rede
+	#Tratamento do cabecalho da camada de rede
 	src_addr, dst_addr, segment = handle_ipv4_header(packet)
 
-	#Recupera informações do pack
+	#Recupera informacões do pack
 	#(Formato, porta fonte, porta destino, sequence number da conexao, ack number da conexao, 
 	# bit ACK, Window Size, CheckSum, Urg data pointer)
 	src_port, dst_port, seq_no, ack_no, \
@@ -256,7 +309,7 @@ def raw_recv(fd):
 		
 	payload = segment[4*(flags>>12):]
 
-	#Identificaçao das flags
+	#Identificacao das flags
 	#Conexao requerida e aceita
 	if (flags & FLAGS_SYN) == FLAGS_SYN:
 		#Verificar ack antes de criar objeto(?)
@@ -264,7 +317,7 @@ def raw_recv(fd):
 
 	elif id_conexao in conexoes:
 		conexao = conexoes[id_conexao]
-		conexao.ack_no += len(payload)
+		#conexao.ack_no += len(payload)
 		
 		if (flags & FLAGS_ACK) == FLAGS_ACK:
 			#Recebe ack e tirar da fila de nao confirmados
@@ -272,8 +325,8 @@ def raw_recv(fd):
 
 		if (len(payload) != 0):
 			#Recebe payload e envia pacote com ack e sem dados
-			payload_recv(conexao, seq_no)
-			#Retorna dados para a aplicaçao(?)
+			payload_recv(conexao, seq_no, payload)
+			#Retorna dados para a aplicacao(?)
 			#return payload
 	#
 	else:
@@ -281,7 +334,7 @@ def raw_recv(fd):
 		(src_addr, src_port, dst_addr, dst_port))
 
 
-#Funçao principal
+#Funcao principal
 if __name__ == '__main__':
 	fd = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
 	loop = asyncio.get_event_loop()
