@@ -29,7 +29,7 @@ class Conexao:
 	def __init__(self, id_conexao, seq_no, ack_no):
 		#Informacoes para a conexao
 		self.id_conexao = id_conexao
-		
+
 		#Controle do envio de ack_no
 		self.ack_no = ack_no
 
@@ -44,7 +44,7 @@ class Conexao:
 		#Filas de envio
 		self.send_queue = b""
 		self.no_ack_queue = b""
-		
+
 		#Janelas
 		self.cwnd = self.rwnd = 10*MSS
 
@@ -67,7 +67,7 @@ def addr2str(addr):
 def str2addr(addr):
 	return bytes(int(x) for x in addr.split('.'))
 
-#Cabecalho da camada de rede - IP Datagram Format 
+#Cabecalho da camada de rede - IP Datagram Format
 def handle_ipv4_header(packet):
 	#Versao do procotolo IP
 	version = packet[0] >> 4
@@ -87,7 +87,7 @@ def handle_ipv4_header(packet):
 #Aceita conexao - Syn + ACK
 def make_synack(conexao):
 	#Monta pacote a ser enviado
-	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit ACK e bit SYN, 
+	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit ACK e bit SYN,
 	# Window Size, CheckSum, Urg data pointer)
 	(src_addr, src_port, dst_addr, dst_port) = conexao.id_conexao
 	return struct.pack('!HHIIHHHH', dst_port, src_port, conexao.next_seq_no, conexao.ack_no, (5<<12)|FLAGS_ACK|FLAGS_SYN,
@@ -95,7 +95,7 @@ def make_synack(conexao):
 
 def make_ack(conexao):
 	#Monta pacote a ser enviado
-	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit ACK e bit SYN, 
+	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit ACK e bit SYN,
 	# Window Size, CheckSum, Urg data pointer)
 	(src_addr, src_port, dst_addr, dst_port) = conexao.id_conexao
 	return struct.pack('!HHIIHHHH', dst_port, src_port, conexao.next_seq_no, conexao.ack_no, (5<<12)|FLAGS_ACK,
@@ -103,7 +103,7 @@ def make_ack(conexao):
 
 def make_fin(conexao):
 	#Monta pacote a ser enviado
-	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit FIN, 
+	#(Formato dos dados, porta fonte, porta destino, Sequence Number, ACK Number,bit FIN,
 	# Window Size, CheckSum, Urg data pointer)
 	(src_addr, src_port, dst_addr, dst_port) = conexao.id_conexao
 	return struct.pack('!HHIIHHHH', dst_port, src_port, conexao.next_seq_no, conexao.ack_no, (5<<12)|FLAGS_FIN|FLAGS_ACK,
@@ -158,14 +158,22 @@ def abre_conexao(fd, id_conexao,seq_no):
 														ack_no=seq_no + 1)
 
 	send_segment(fd, conexao, make_synack(conexao))
-					
+
 	conexao.next_seq_no += 1
-		
+
 	return conexao
 
 
+def fin_recv(fd, conexao, seq_no):
+	if conexao.ack_no == seq_no:
+		# Se tiver recebido tudo certo até aqui, incrementa 1 para informar que é um ACK do FIN
+		conexao.ack_no += 1
+	# Senão, o valor de ack_no terá sido mantido, fazendo com que a outra ponta saiba onde paramos de receber dados
+	send_segment(fd, conexao, make_ack(conexao))
+
+
 #Trata recebimento do ack_no
-def ack_recv(conexao, ack_no):
+def ack_recv(fd, conexao, ack_no):
 	if(ack_no > conexao.send_base):
 		#Handshake, nenhum dado presente nas filas
 		#Duvidas... o que fzr
@@ -180,8 +188,8 @@ def ack_recv(conexao, ack_no):
 			qtd_dados_reconhecidos = ack_no - conexao.send_base
 			#Atualiza send_base
 			conexao.send_base = ack_no
-			
-			#Para timer do ultimo pacote sem resposta ack 
+
+			#Para timer do ultimo pacote sem resposta ack
 			if conexao.timer:
 				conexao.timer.cancel()
 				conexao.timer = None #~(conexao.timer.cancelled())
@@ -196,7 +204,7 @@ def ack_recv(conexao, ack_no):
 			print("\n")
 			#send(fd,conexao,b"mensagem qualquer em binario\n")
 			print("DEPOIS: \n")
-			print(conexao.send_queue)	
+			print(conexao.send_queue)
 			print("\n")
 			print(conexao.no_ack_queue)
 
@@ -212,10 +220,13 @@ def ack_recv(conexao, ack_no):
 
 #Trata recebimento de payload
 def payload_recv(conexao, seq_no, payload):
-	if conexao.ack_no == seq_no:
+	in_order = conexao.ack_no == seq_no
+	if in_order:
 		conexao.ack_no += len(payload)
-		send_segment(fd, conexao, make_ack(conexao))
+	send_segment(fd, conexao, make_ack(conexao))
+	if in_order:
 		app_recv(fd, conexao, payload)
+
 
 
 def app_recv(fd, conexao, payload):
@@ -236,6 +247,7 @@ def app_recv(fd, conexao, payload):
 
 def close(fd, conexao):
 	send_segment(fd, conexao, make_fin(conexao))
+	conexao.next_seq_no += 1
 
 
 def send(fd, conexao, dados):
@@ -251,7 +263,7 @@ def send(fd, conexao, dados):
 	for i in range(0, len(a_transmitir), MSS):
 		payload = a_transmitir[i:i+MSS]
 		send_raw(fd, conexao, payload)
-		
+
 	print("========================= SAINDO ======================================\n")
 
 	#Enviando dados pelo raw socket
@@ -264,7 +276,7 @@ def send_raw(fd, conexao, payload):
 
 	#Montando pacote
 	segment = struct.pack('!HHIIHHHH', src_port, dst_port, conexao.next_seq_no,
-							0, (5<<12),
+							conexao.ack_no, (5<<12)|FLAGS_ACK,
 							1024, 0, 0) + payload
 
 	#Pacote com checksum
@@ -294,7 +306,7 @@ def raw_recv(fd):
 	src_addr, dst_addr, segment = handle_ipv4_header(packet)
 
 	#Recupera informacões do pack
-	#(Formato, porta fonte, porta destino, sequence number da conexao, ack number da conexao, 
+	#(Formato, porta fonte, porta destino, sequence number da conexao, ack number da conexao,
 	# bit ACK, Window Size, CheckSum, Urg data pointer)
 	src_port, dst_port, seq_no, ack_no, \
 			flags, window_size, checksum, urg_ptr = \
@@ -306,7 +318,7 @@ def raw_recv(fd):
 	#Aceita somente a porta 7000
 	if dst_port != 7000:
 		return
-		
+
 	payload = segment[4*(flags>>12):]
 
 	#Identificacao das flags
@@ -318,10 +330,13 @@ def raw_recv(fd):
 	elif id_conexao in conexoes:
 		conexao = conexoes[id_conexao]
 		#conexao.ack_no += len(payload)
-		
+
 		if (flags & FLAGS_ACK) == FLAGS_ACK:
 			#Recebe ack e tirar da fila de nao confirmados
-			ack_recv(conexao, ack_no)
+			ack_recv(fd, conexao, ack_no)
+
+		if (flags & FLAGS_FIN) == FLAGS_FIN:
+			fin_recv(fd, conexao, seq_no)
 
 		if (len(payload) != 0):
 			#Recebe payload e envia pacote com ack e sem dados
