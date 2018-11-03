@@ -54,9 +54,13 @@ class Conexao:
 		#Flags
 		#Flag handshake
 		self.flag_handshake = True
+		self.flag_close_conection = False
 
 		# dados da camada de aplicação
 		self.http_req = b''
+
+		#Fila de segmentos
+		self.segment_queue = []
 
 
 #Converte endereco para string
@@ -152,7 +156,7 @@ def abre_conexao(fd, id_conexao,seq_no):
 	print('%s:%d -> %s:%d (seq=%d)' % (src_addr, src_port,
 											dst_addr, dst_port,seq_no))
 
-		#Alocando nova conexao
+	#Alocando nova conexao
 	conexoes[id_conexao] = conexao = Conexao(id_conexao=id_conexao,
 														seq_no=struct.unpack('I', os.urandom(4))[0],
 														ack_no=seq_no + 1)
@@ -180,41 +184,45 @@ def ack_recv(fd, conexao, ack_no):
 		if(conexao.flag_handshake == True):
 			conexao.send_base = ack_no
 			conexao.flag_handshake = False
-			print("eh na sola da bota eh na palma da bota")
+			print("Conexao estabelecida...\n")
 		#Situacao onde a conexao já esta estabelecida
 		else:
 			#Dados confirmados a serem removidos da noAck_
-			print("Entrei no else\n")
+			print("Confirmando ack: \n", ack_no)
 			qtd_dados_reconhecidos = ack_no - conexao.send_base
+			print("Dados reconhecidos: \n", qtd_dados_reconhecidos)
 			#Atualiza send_base
 			conexao.send_base = ack_no
 
 			#Para timer do ultimo pacote sem resposta ack
 			if conexao.timer:
 				conexao.timer.cancel()
-				conexao.timer = None #~(conexao.timer.cancelled())
+				conexao.timer = None
+				print("============Timer cancelado===============")
 
 			#Remove da fila de enviados sem confirmacao
 			conexao.no_ack_queue = conexao.no_ack_queue[qtd_dados_reconhecidos:]
 
-			print("ANTES: \n")
-			print(conexao.send_queue)
-			print("\n")
-			print(conexao.no_ack_queue)
-			print("\n")
-			#send(fd,conexao,b"mensagem qualquer em binario\n")
-			print("DEPOIS: \n")
-			print(conexao.send_queue)
-			print("\n")
-			print(conexao.no_ack_queue)
-
 			#No caso de haver mais pacotes ainda sem resposta ack, start time para o ultimo deles
-			if(conexao.no_ack_queue != b''):
-				print("if vazio")
+			if conexao.no_ack_queue != b'':
+				#Remontar segmento para reenvio
+
+				print("+++++++Deveria criar outro timer++++++++++")
 				#Adicionar novo timer
 				#Usar dicionario
 				#Como referenciar o pacote e fazer callback?
-	return
+
+			#Todos os acks foram reconhecidos e ainda a dados a serem enviados
+			if conexao.no_ack_queue == b'' and conexao.send_queue != b'':
+				#Chamada da função send sem a passagem de novos dados
+				send(fd, conexao, b'')
+				#Todos os dados a serem enviados já foram enviados
+				if conexao.send_queue == b'' :
+					#Se houver intenção de fechar conexão, essa ação é realizada
+					if conexao.flag_close_conection :
+						#Enviando fechamento de conexão
+						send_segment(fd, conexao, make_fin(conexao))
+						conexao.next_seq_no += 1
 
 
 
@@ -246,8 +254,7 @@ def app_recv(fd, conexao, payload):
 
 
 def close(fd, conexao):
-	send_segment(fd, conexao, make_fin(conexao))
-	conexao.next_seq_no += 1
+	conexao.flag_close_conection = True
 
 
 def send(fd, conexao, dados):
@@ -264,9 +271,7 @@ def send(fd, conexao, dados):
 		payload = a_transmitir[i:i+MSS]
 		send_raw(fd, conexao, payload)
 
-	print("========================= SAINDO ======================================\n")
-
-	#Enviando dados pelo raw socket
+#Enviando dados pelo raw socket
 def send_raw(fd, conexao, payload):
 
 	#Conexao a ser enviado o pacote
@@ -283,19 +288,28 @@ def send_raw(fd, conexao, payload):
 	segment = fix_checksum(segment, src_addr, dst_addr)
 
 	#Enviando
-	fd.sendto(segment, (src_addr, src_port))
+	send_segment(fd, conexao, segment)
 
 	#Adiciona timer se nao tiver
 	if conexao.timer is None:
-		#Reenvia o pacote caso o timer nao estiver desativado
-		#conexao.timer = asyncio.get_event_loop().call_later(3, send_raw, fd, conexao, payload)
-		print("Criei \n")
-
+		#Reenvia o pacote
+		conexao.timer = asyncio.get_event_loop().call_later(2, resend, fd, conexao, segment)
+		print("Timer criado \n")
+	
 	#Adicionando current time do seq_no enviado
 	conexao.dic_seq_no_curr_time[conexao.next_seq_no] = time.time()
 
 	#Atualizando sequence number
 	conexao.next_seq_no = (conexao.next_seq_no + len(payload)) & 0xffffffff
+
+def resend(fd, conexao, segment):
+	
+	#Reenvia
+	print('Resend called')
+	send_segment(fd, conexao, segment)
+	#Timer ativado novamente
+	conexao.timer = asyncio.get_event_loop().call_later(2, resend, fd, conexao, segment)
+	print("Timer resend criado \n")
 
 #Recebe novos dados do raw socket
 def raw_recv(fd):
@@ -341,8 +355,6 @@ def raw_recv(fd):
 		if (len(payload) != 0):
 			#Recebe payload e envia pacote com ack e sem dados
 			payload_recv(conexao, seq_no, payload)
-			#Retorna dados para a aplicacao(?)
-			#return payload
 	#
 	else:
 		print('%s:%d -> %s:%d (pacote associado a conexao desconhecida)' %
