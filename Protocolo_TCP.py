@@ -11,7 +11,7 @@
 #Estabelecer conexão (handshake SYN, SYN+ACK, ACK) com número de sequência inicial aleatório.  #FEITO
 #Transmitir e receber corretamente os segmentos. #FEITO
 #Retransmitir corretamente segmentos que forem perdidos ou corrompidos. #MAIS OU MENOS
-#Estimar o timeout para retransmissão de acordo com as recomendações do livro-texto (RFC 2988).#FEITO , falta colocar no timer de retransmissão 
+#Estimar o timeout para retransmissão de acordo com as recomendações do livro-texto (RFC 2988).#FEITO 
 #Implementar a semântica para timeout e ACKs duplos de acordo com as recomendações do livro-texto. #FALTA
 #Tratar e informar corretamente o campo window size, implementando controle de fluxo. #FALTA
 #Realizar controle de congestionamento de acordo com as recomendações do livro-texto (RFC 5681). #FALTA
@@ -75,7 +75,7 @@ class Conexao:
 		self.http_req = b''
 
 		#RTT
-		self.estimated_rtt = 0.000005
+		self.estimated_rtt = 0
 		self.dev_rtt = 0
 		self.timeout_interval = 1
 
@@ -178,8 +178,11 @@ def abre_conexao(fd, id_conexao,seq_no):
 														seq_no=struct.unpack('I', os.urandom(4))[0],
 														ack_no=seq_no + 1)
 
+	#Adicionando time para obter primeiro RTT posteriormente
+	conexao.dic_seq_no_curr_time[conexao.next_seq_no] = time.time()
+	#Fazendo envio
 	send_segment(fd, conexao, make_synack(conexao))
-
+	#Atualizando next_seq_no
 	conexao.next_seq_no += 1
 
 	return conexao
@@ -202,6 +205,22 @@ def ack_recv(fd, conexao, ack_no):
 			conexao.send_base = ack_no
 			conexao.flag_handshake = False
 			print("Conexao estabelecida...\n")
+			
+			#inicializando variaveis de controle de tempo
+			#sampleRTT
+			sample_rtt = time.time() - conexao.dic_seq_no_curr_time[ack_no - 1]
+			print("sampleRTT Inicial: " + str(sample_rtt))
+
+			#EstimatedRTT
+			conexao.estimated_rtt = sample_rtt
+			print("EstimatedRTT  Inicial: " + str(conexao.estimated_rtt))
+
+			#DevRTT
+			conexao.dev_rtt = sample_rtt/2
+			print("DevRTT  Inicial: " + str(conexao.dev_rtt))
+
+
+		#Flag de finalizar conexão ativa
 		elif(conexao.flag_fin):
 			conexao.send_base = ack_no
 			print("Conexão encerrada")
@@ -216,8 +235,12 @@ def ack_recv(fd, conexao, ack_no):
 			conexao.send_base = ack_no
 
 			#sampleRTT
-			sample_rtt = time.time() - conexao.dic_seq_no_curr_time[ack_no - qtd_dados_reconhecidos]
-			print("sampleRTT: " + str(sample_rtt))
+			if ack_no - qtd_dados_reconhecidos in conexao.dic_seq_no_curr_time:
+				sample_rtt = time.time() - conexao.dic_seq_no_curr_time[ack_no - qtd_dados_reconhecidos]
+				print("sampleRTT: " + str(sample_rtt))
+			else:
+				sample_rtt = conexao.estimated_rtt
+				print("problema de key")
 
 			#EstimatedRTT
 			conexao.estimated_rtt = 0.875 * conexao.estimated_rtt + 0.0125 * sample_rtt
@@ -253,7 +276,7 @@ def ack_recv(fd, conexao, ack_no):
 							1024, 0, 0) + dados
 
 				#Setando novo timer
-				conexao.timer = asyncio.get_event_loop().call_later(2, retransmission, fd, conexao, segment)
+				conexao.timer = asyncio.get_event_loop().call_later(conexao.timeout_interval, retransmission, fd, conexao, segment)
 				print("============Criado um novo timer para retrasmissao===============")
 				
 
@@ -338,7 +361,7 @@ def send_raw(fd, conexao, payload):
 	#Adiciona timer se nao tiver
 	if conexao.timer is None:
 		#Reenvia o pacote
-		conexao.timer = asyncio.get_event_loop().call_later(2, retransmission, fd, conexao, segment)
+		conexao.timer = asyncio.get_event_loop().call_later(conexao.timeout_interval, retransmission, fd, conexao, segment)
 		print("============Criado um novo timer===============")
 	
 	#Adicionando current time do seq_no enviado
@@ -353,8 +376,9 @@ def retransmission(fd, conexao, segment):
 	print('retransmission called')
 	send_segment(fd, conexao, segment)
 	#Timer ativado novamente
-	#conexao.timer = asyncio.get_event_loop().call_later(conexao.timeout_interval, retransmission, fd, conexao, segment)
-	#print("============Criado um novo timer dentro de retransmission===============")
+	if conexao.timer is None:
+		timer = asyncio.get_event_loop().call_later(conexao.timeout_interval, retransmission, fd, conexao, segment)
+		print("============Criado um novo timer dentro de retransmission===============")
 
 #Recebe novos dados do raw socket
 def raw_recv(fd):
