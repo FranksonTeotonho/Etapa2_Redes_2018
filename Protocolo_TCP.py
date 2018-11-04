@@ -19,6 +19,8 @@ FLAGS_RST = 1<<2 #Flag de warning socket nao existente
 FLAGS_ACK = 1<<4 #Flag de resposta ACK
 
 MSS = 1460 #Maximum Segment Size
+#Obs. Se em algum momento do controle de fluxo ou congestionamento o MSS sofrer um resize,
+#incorporar MSS a conexão verificar locais onde ele é chamado globalmente. 
 
 TESTAR_PERDA_ENVIO = False
 
@@ -205,9 +207,11 @@ def ack_recv(fd, conexao, ack_no):
 
 			#No caso de haver mais pacotes ainda sem resposta ack, start time para o ultimo deles
 			if conexao.no_ack_queue != b'':
+				#reconstruindo ultimo pacote não reconhecido
+				dados = conexao.no_ack_queue[:MSS]
+				#send_raw(fd, conexao, dados)
+				print("============Criado um novo timer para retrasmissao===============")
 				#Remontar segmento para reenvio
-
-				print("+++++++Deveria criar outro timer++++++++++")
 				#Adicionar novo timer
 				#Usar dicionario
 				#Como referenciar o pacote e fazer callback?
@@ -216,13 +220,14 @@ def ack_recv(fd, conexao, ack_no):
 			if conexao.no_ack_queue == b'' and conexao.send_queue != b'':
 				#Chamada da função send sem a passagem de novos dados
 				send(fd, conexao, b'')
-				#Todos os dados a serem enviados já foram enviados
-				if conexao.send_queue == b'' :
-					#Se houver intenção de fechar conexão, essa ação é realizada
-					if conexao.flag_close_conection :
-						#Enviando fechamento de conexão
-						send_segment(fd, conexao, make_fin(conexao))
-						conexao.next_seq_no += 1
+			
+			#Todos os dados a serem enviados já foram enviados
+			if conexao.send_queue == b'' :
+				#Se houver intenção de fechar conexão, essa ação é realizada
+				if conexao.flag_close_conection :
+					#Enviando fechamento de conexão
+					send_segment(fd, conexao, make_fin(conexao))
+					conexao.next_seq_no += 1
 
 
 
@@ -234,7 +239,6 @@ def payload_recv(conexao, seq_no, payload):
 	send_segment(fd, conexao, make_ack(conexao))
 	if in_order:
 		app_recv(fd, conexao, payload)
-
 
 
 def app_recv(fd, conexao, payload):
@@ -254,8 +258,8 @@ def app_recv(fd, conexao, payload):
 
 
 def close(fd, conexao):
+	#Flag que avisa intenção do app de fechar conexão
 	conexao.flag_close_conection = True
-
 
 def send(fd, conexao, dados):
 
@@ -355,7 +359,6 @@ def raw_recv(fd):
 		if (len(payload) != 0):
 			#Recebe payload e envia pacote com ack e sem dados
 			payload_recv(conexao, seq_no, payload)
-	#
 	else:
 		print('%s:%d -> %s:%d (pacote associado a conexao desconhecida)' %
 		(src_addr, src_port, dst_addr, dst_port))
