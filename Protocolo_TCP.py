@@ -6,6 +6,18 @@
 # sudo iptables -I OUTPUT -p tcp --tcp-flags RST RST -j DROP
 #
 
+################################ Etapa 2 ##############################
+
+#Estabelecer conexão (handshake SYN, SYN+ACK, ACK) com número de sequência inicial aleatório.  #FEITO
+#Transmitir e receber corretamente os segmentos. #FEITO
+#Retransmitir corretamente segmentos que forem perdidos ou corrompidos. #MAIS OU MENOS
+#Estimar o timeout para retransmissão de acordo com as recomendações do livro-texto (RFC 2988).#FEITO , falta colocar no timer de retransmissão 
+#Implementar a semântica para timeout e ACKs duplos de acordo com as recomendações do livro-texto. #FALTA
+#Tratar e informar corretamente o campo window size, implementando controle de fluxo. #FALTA
+#Realizar controle de congestionamento de acordo com as recomendações do livro-texto (RFC 5681). #FALTA
+#Fechar a conexão de forma limpa (lidando corretamente com a flag FIN). #FEITO
+
+
 import asyncio
 import socket
 import struct
@@ -57,12 +69,15 @@ class Conexao:
 		#Flag handshake
 		self.flag_handshake = True
 		self.flag_close_conection = False
+		self.flag_fin = False
 
 		# dados da camada de aplicação
 		self.http_req = b''
 
-		#Fila de segmentos
-		self.segment_queue = []
+		#RTT
+		self.estimated_rtt = 0.000005
+		self.dev_rtt = 0
+		self.timeout_interval = 1
 
 
 #Converte endereco para string
@@ -187,16 +202,37 @@ def ack_recv(fd, conexao, ack_no):
 			conexao.send_base = ack_no
 			conexao.flag_handshake = False
 			print("Conexao estabelecida...\n")
+		elif(conexao.flag_fin):
+			conexao.send_base = ack_no
+			print("Conexão encerrada")
 		#Situacao onde a conexao já esta estabelecida
 		else:
 			#Dados confirmados a serem removidos da noAck_
 			print("Confirmando ack: \n", ack_no)
 			qtd_dados_reconhecidos = ack_no - conexao.send_base
 			print("Dados reconhecidos: \n", qtd_dados_reconhecidos)
+			
 			#Atualiza send_base
 			conexao.send_base = ack_no
 
-			#Para timer do ultimo pacote sem resposta ack
+			#sampleRTT
+			sample_rtt = time.time() - conexao.dic_seq_no_curr_time[ack_no - qtd_dados_reconhecidos]
+			print("sampleRTT: " + str(sample_rtt))
+
+			#EstimatedRTT
+			conexao.estimated_rtt = 0.875 * conexao.estimated_rtt + 0.0125 * sample_rtt
+			print("EstimatedRTT: " + str(conexao.estimated_rtt))
+
+			#DevRTT
+			conexao.dev_rtt = 0.75 * conexao.dev_rtt + 0.25 * abs(sample_rtt - conexao.estimated_rtt)
+			print("DevRTT: " + str(conexao.dev_rtt))
+
+			#Timeout
+			conexao.timeout_interval = conexao.estimated_rtt + 4*conexao.dev_rtt
+			print("Timeout: " + str(conexao.timeout_interval))
+
+
+			#Parar timer do ultimo pacote sem resposta ack
 			if conexao.timer:
 				conexao.timer.cancel()
 				conexao.timer = None
@@ -209,12 +245,17 @@ def ack_recv(fd, conexao, ack_no):
 			if conexao.no_ack_queue != b'':
 				#reconstruindo ultimo pacote não reconhecido
 				dados = conexao.no_ack_queue[:MSS]
-				#send_raw(fd, conexao, dados)
+				
+				(dst_addr, dst_port, src_addr, src_port) = conexao.id_conexao			
+				
+				segment = struct.pack('!HHIIHHHH', src_port, dst_port, conexao.next_seq_no,
+							conexao.ack_no, (5<<12)|FLAGS_ACK,
+							1024, 0, 0) + dados
+
+				#Setando novo timer
+				conexao.timer = asyncio.get_event_loop().call_later(2, retransmission, fd, conexao, segment)
 				print("============Criado um novo timer para retrasmissao===============")
-				#Remontar segmento para reenvio
-				#Adicionar novo timer
-				#Usar dicionario
-				#Como referenciar o pacote e fazer callback?
+				
 
 			#Todos os acks foram reconhecidos e ainda a dados a serem enviados
 			if conexao.no_ack_queue == b'' and conexao.send_queue != b'':
@@ -250,7 +291,7 @@ def app_recv(fd, conexao, payload):
 			send(fd, conexao, b'HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\nExperimente <a href="/arquivo">arquivo</a>')
 			close(fd, conexao)
 		elif path == b'/arquivo':
-			send(fd, conexao, b'HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n' + 100000*b'repetido\n')
+			send(fd, conexao, b'HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n' + 10000*b'repetido\n')
 			close(fd, conexao)
 		else:
 			send(fd, conexao, b'HTTP/1.0 404 Not Found\r\n\r\nNot Found')
@@ -289,7 +330,7 @@ def send_raw(fd, conexao, payload):
 							1024, 0, 0) + payload
 
 	#Pacote com checksum
-	segment = fix_checksum(segment, src_addr, dst_addr)
+	#segment = fix_checksum(segment, src_addr, dst_addr)
 
 	#Enviando
 	send_segment(fd, conexao, segment)
@@ -297,8 +338,8 @@ def send_raw(fd, conexao, payload):
 	#Adiciona timer se nao tiver
 	if conexao.timer is None:
 		#Reenvia o pacote
-		conexao.timer = asyncio.get_event_loop().call_later(2, resend, fd, conexao, segment)
-		print("Timer criado \n")
+		conexao.timer = asyncio.get_event_loop().call_later(2, retransmission, fd, conexao, segment)
+		print("============Criado um novo timer===============")
 	
 	#Adicionando current time do seq_no enviado
 	conexao.dic_seq_no_curr_time[conexao.next_seq_no] = time.time()
@@ -306,14 +347,14 @@ def send_raw(fd, conexao, payload):
 	#Atualizando sequence number
 	conexao.next_seq_no = (conexao.next_seq_no + len(payload)) & 0xffffffff
 
-def resend(fd, conexao, segment):
+def retransmission(fd, conexao, segment):
 	
 	#Reenvia
-	print('Resend called')
+	print('retransmission called')
 	send_segment(fd, conexao, segment)
 	#Timer ativado novamente
-	conexao.timer = asyncio.get_event_loop().call_later(2, resend, fd, conexao, segment)
-	print("Timer resend criado \n")
+	#conexao.timer = asyncio.get_event_loop().call_later(conexao.timeout_interval, retransmission, fd, conexao, segment)
+	#print("============Criado um novo timer dentro de retransmission===============")
 
 #Recebe novos dados do raw socket
 def raw_recv(fd):
@@ -348,13 +389,13 @@ def raw_recv(fd):
 	elif id_conexao in conexoes:
 		conexao = conexoes[id_conexao]
 		#conexao.ack_no += len(payload)
+		if (flags & FLAGS_FIN) == FLAGS_FIN:
+			conexao.flag_fin = True
+			fin_recv(fd, conexao, seq_no)
 
 		if (flags & FLAGS_ACK) == FLAGS_ACK:
 			#Recebe ack e tirar da fila de nao confirmados
 			ack_recv(fd, conexao, ack_no)
-
-		if (flags & FLAGS_FIN) == FLAGS_FIN:
-			fin_recv(fd, conexao, seq_no)
 
 		if (len(payload) != 0):
 			#Recebe payload e envia pacote com ack e sem dados
