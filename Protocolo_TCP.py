@@ -14,7 +14,7 @@
 #Estimar o timeout para retransmissão de acordo com as recomendações do livro-texto (RFC 2988).#FEITO 
 #Implementar a semântica para timeout e ACKs duplos de acordo com as recomendações do livro-texto. #FALTA
 #Tratar e informar corretamente o campo window size, implementando controle de fluxo. #FALTA
-#Realizar controle de congestionamento de acordo com as recomendações do livro-texto (RFC 5681). #FALTA
+#Realizar controle de congestionamento de acordo com as recomendações do livro-texto (RFC 5681). #FEITO
 #Fechar a conexão de forma limpa (lidando corretamente com a flag FIN). #FEITO
 
 
@@ -60,8 +60,10 @@ class Conexao:
 		self.no_ack_queue = b""
 
 		#Janelas
-		self.cwnd = self.rwnd = 10*MSS
+		self.cwnd = self.rwnd = 3*MSS # de acordo com a RFC 5681
 
+		#Threshold de congestionamento
+		self.ssthresh = 10*MSS
 		#Timer
 		self.timer = None
 
@@ -231,6 +233,11 @@ def ack_recv(fd, conexao, ack_no):
 			qtd_dados_reconhecidos = ack_no - conexao.send_base
 			print("Dados reconhecidos: \n", qtd_dados_reconhecidos)
 			
+			if (conexao.cwnd < conexao.ssthresh):
+				conexao.cwnd += min(MSS - qtd_dados_reconhecidos,MSS) # Slow Start Algorithm (RFC 5681)
+			else:
+				conexao.cwnd += MSS*MSS/conexao.cwnd # implementação basica de congestion avoidance
+
 			#Atualiza send_base
 			conexao.send_base = ack_no
 
@@ -266,6 +273,8 @@ def ack_recv(fd, conexao, ack_no):
 
 			#No caso de haver mais pacotes ainda sem resposta ack, start time para o ultimo deles
 			if conexao.no_ack_queue != b'':
+
+				conexao.ssthresh = max(len(conexao.no_ack_queue)/2,2*MSS) #len(..) eh o FlightSize
 				#reconstruindo ultimo pacote não reconhecido
 				dados = conexao.no_ack_queue[:MSS]
 				

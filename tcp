@@ -1,0 +1,3 @@
+#!/bin/bash
+sudo iptables -I OUTPUT -p tcp --tcp-flags RST RST -j DROP
+sudo python3 Protocolo_TCP.py
